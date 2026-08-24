@@ -33,6 +33,7 @@ address in these listings.
 | file | contents |
 |------|----------|
 | `omega_main.asm` | main CPU program, 0x0000–0x3FFF, every reachable routine labeled and annotated; data regions typed (object templates, coinage tables, pages, high-score defaults) |
+| `omegarace_defines.asm` | the memory map as a standalone reference: every named RAM cell, hardware port, and notable ROM table with address and role, in Z80 `EQU` form. The names are exactly the symbols the listing prints inline (both come from z80trace.py's symbol table), so this is the glossary for `omega_main.asm` — including the `IY = 0x4080` convention that resolves every `(IY±d)` operand |
 | `omega_sound.asm` | sound board program (`sound_k5.bin`), the command dispatch table at $024A and all sound scripts |
 | `omega_vecrom.asm` | the vector ROM as DVG opcodes: every glyph and shape subroutine, named |
 
