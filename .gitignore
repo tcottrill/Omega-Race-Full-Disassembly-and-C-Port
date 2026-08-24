@@ -1,0 +1,46 @@
+# Visual Studio caches / per-user state (172 MB of precompiled headers)
+.vs/
+*.suo
+*.opt
+*.ncb
+*.aps
+*.user
+
+# build output
+c_src/obj/
+*.obj
+*.exe
+*.dll
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.plg
+Debug/
+x64/
+
+# runtime state
+omega_c.nv
+
+# local backup archives (exception: the MAME-style sample set the game
+# loads at runtime)
+*.zip
+!c_src/samples/omegrace.zip
+__pycache__/
+omega_win.ini
+omega_win.log
+omega_frames*.csv
+
+# ROM images are not distributed: users supply their own MAME omegrace
+# set and regenerate with disasm/gen_from_roms.py (see README.md)
+disasm/omega_dump.bin
+disasm/sound_k5.bin
+disasm/dvgprom.bin
+Release/roms/
+Release/romsbu/
+
+# local development records - not part of the published project
+STATUS.md
+docs/superpowers/
+c_src/DVG_PAGES_PLAN.md
+.claude/
