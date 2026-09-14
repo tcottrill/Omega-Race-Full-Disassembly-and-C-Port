@@ -196,6 +196,20 @@ static uint64_t emu_cycles(void) { return cycles_base + mz80->mz80GetElapsedTick
 static uint64_t dvg_busy_until = 0;
 static int dvg_busy(void) { return emu_cycles() < dvg_busy_until; }
 
+// --lock60: the AAE omegrace60 model. "Done" is reported once per 60 Hz frame
+// (set at the frame boundary, cleared on go) and the IRQ fires 4x per frame
+// (240 Hz) at fixed positions. Frame = 50000 Z80 cycles at 3 MHz.
+static int lock60 = 0;
+static int lock_done = 1;
+#define LOCK_CYCLES_PER_INT 12500
+
+// --passrate-counters: write-event counters (see the write map)
+static int64_t ev_pass = 0;     // writes to tick_delta 0x4019 (one per MAINLOOP head pass)
+static int64_t ev_dec_407C = 0; // decrements of difficulty countdown (iy-4), ROM 0x1DA0
+static int64_t ev_dec_407F = 0; // decrements of special-spawn arm (iy-1), ROM 0x1C72
+static int64_t ev_dec_406D = 0; // decrements of 2P turn-banner hold, ROM 0x0D35
+static int64_t ev_kicks = 0;    // VG kicks
+
 //////////////////////// frame statistics ////////////////////////////////////
 
 struct frame_rec
@@ -218,11 +232,17 @@ static uint8_t in_start = 0xff;    // port 0x12 (bit6 low = start1)
 //////////////////////// port handlers ///////////////////////////////////////
 
 static UINT16 r_watchdog(UINT16, struct z80PortRead*) { return 0; }
-static UINT16 r_vg_status(UINT16, struct z80PortRead*) { return dvg_busy() ? 0x80 : 0x00; }
+static UINT16 r_vg_status(UINT16, struct z80PortRead*)
+{
+    if (lock60) return lock_done ? 0x00 : 0x80;
+    return dvg_busy() ? 0x80 : 0x00;
+}
 
 static UINT16 r_vg_go(UINT16, struct z80PortRead*)
 {
-    if (dvg_busy()) return 0;
+    if (lock60) lock_done = 0;
+    else if (dvg_busy()) return 0;
+    ev_kicks++;
 
     int64_t master = dvg_run_list();
     uint64_t now = emu_cycles();
@@ -247,9 +267,36 @@ static UINT16 r_spin(UINT16, struct z80PortRead*) { return 0x04; }
 static void w_ignore(UINT16, UINT8, struct z80PortWrite*) {}
 static void w_rom(UINT32, UINT8, struct MemoryWriteByte*) {}
 
+// Event counters for --passrate-counters. The handler must store the byte
+// itself (a mapped write bypasses the core's plain RAM store).
+static void w_count(UINT32 a, UINT8 d, struct MemoryWriteByte* map)
+{
+    // FIX (not in the plan text): cpu_z80::mz80PutMemory() calls
+    // memoryCall(addr - lowAddr, byte, mapEntry) - the first param is the
+    // offset WITHIN the mapped range, not the absolute address (see
+    // cpu_z80.cpp mz80PutMemory). Each of these four ranges is a single
+    // byte (lowAddr == highAddr), so that offset is always 0 and a plain
+    // "switch (a)" on the raw param never matches, leaving every counter
+    // at 0. Recover the absolute address from the map entry's lowAddr.
+    UINT32 addr = map->lowAddr + a;
+    uint8_t old = MEM[addr];
+    MEM[addr] = d;
+    switch (addr)
+    {
+    case 0x4019: ev_pass++; break;
+    case 0x407C: if (d == (uint8_t)(old - 1)) ev_dec_407C++; break;
+    case 0x407F: if (d == (uint8_t)(old - 1)) ev_dec_407F++; break;
+    case 0x406D: if (d == (uint8_t)(old - 1)) ev_dec_406D++; break;
+    }
+}
+
 static struct MemoryWriteByte WriteMap[] =
 {
     { 0x0000, 0x3fff, w_rom },
+    { 0x4019, 0x4019, w_count },
+    { 0x406D, 0x406D, w_count },
+    { 0x407C, 0x407C, w_count },
+    { 0x407F, 0x407F, w_count },
     { 0x9000, 0x9fff, w_rom },
     { (UINT32)-1, (UINT32)-1, NULL }
 };
@@ -342,6 +389,33 @@ static void report(const char* tag, int from, int to)
 
 static void run_seconds(double secs)
 {
+    if (lock60)
+    {
+        // 60 frames/s x 4 IRQ slices of 12500 cycles; done at each frame end.
+        // FIX (not in the plan text): a persistent fractional carry and a
+        // persistent slice-phase counter, instead of per-call truncation.
+        // --passrate-counters times play in 0.02 s steps; 0.02*240 = 4.8,
+        // so computing slices fresh per call as (int64_t)(secs*240) drops
+        // 0.8 slice on every call (4 executed instead of 4.8), understating
+        // elapsed emulated time by ~17% and reporting 50.00 kicks/s instead
+        // of the exact 60.00 the 240 Hz tick guarantees. The carry recovers
+        // the lost fraction across calls; slice_phase keeps the "done every
+        // 4th slice" cadence aligned across call boundaries instead of
+        // restarting the 0..3 count at 0 on every run_seconds() call.
+        static double carry = 0.0;
+        static int64_t slice_phase = 0;
+        carry += secs * 240.0;
+        int64_t slices = (int64_t)carry;
+        carry -= (double)slices;
+        for (int64_t i = 0; i < slices; i++)
+        {
+            mz80->mz80exec(LOCK_CYCLES_PER_INT);
+            mz80->mz80int(0xff);
+            cycles_base += mz80->mz80GetElapsedTicks(0xff);
+            if ((++slice_phase & 3) == 0) lock_done = 1;
+        }
+        return;
+    }
     int64_t slices = (int64_t)(secs * 250);
     for (int64_t i = 0; i < slices; i++)
     {
@@ -516,6 +590,35 @@ int main(int argc, char** argv)
         return 0;
     }
 
+    if (argc > 1 && !strcmp(argv[1], "--passrate-counters"))
+    {
+        // Per-second rates of the MAINLOOP head pass and of the three
+        // pass-denominated counters' decrements, in idle play (mode 3),
+        // stock DVG-busy model vs the AAE omegrace60 lock ("lock60" arg).
+        // The question: does frame-locking done at 60 Hz change the
+        // cadence of per-pass logic? Hardware pacing floats 43-52 fps.
+        lock60 = (argc > 2 && !strcmp(argv[2], "lock60"));
+        run_seconds(3.0);
+        in_coin = 0xfe;  run_seconds(0.2);  in_coin = 0xff;
+        run_seconds(0.8);
+        in_start = 0xbf; run_seconds(0.2);  in_start = 0xff;
+        run_seconds(1.0);                       // spawn -> play settles
+        ev_pass = ev_dec_407C = ev_dec_407F = ev_dec_406D = ev_kicks = 0;
+        double secs = 0.0;
+        for (int step = 0; step < 30 * 50; step++)
+        {
+            if (MEM[0x4024] != 3) break;        // ship lost -> stop timing
+            run_seconds(0.02);
+            secs += 0.02;
+        }
+        printf("%s: %.2f s in play (mode 3)\n", lock60 ? "lock60" : "stock", secs);
+        printf("  kicks/s        = %8.2f\n", ev_kicks / secs);
+        printf("  head passes/s  = %8.2f   (tick_delta 0x4019 writes)\n", ev_pass / secs);
+        printf("  dec 0x407C /s  = %8.3f   (difficulty countdown, ROM 0x1DA0)\n", ev_dec_407C / secs);
+        printf("  dec 0x407F /s  = %8.3f   (special-spawn arm, ROM 0x1C72)\n", ev_dec_407F / secs);
+        printf("  dec 0x406D /s  = %8.3f   (2P turn-banner hold, ROM 0x0D35; 0 in 1P play)\n", ev_dec_406D / secs);
+        return 0;
+    }
     if (argc > 1 && !strcmp(argv[1], "--passrate-trace"))
     {
         // Distribution of tick_delta (0x4019, written with B on every
