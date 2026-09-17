@@ -25,6 +25,7 @@ extern uint8_t hl_dsw_c6;     /* DIP bank C6                    (0xbf) */
 extern void (*hl_vec_line_hook)(float x0, float y0, float x1, float y1, int z);
 extern void (*hl_sample_start_hook)(int channel, int sample, int loop);
 extern void (*hl_sample_stop_hook)(int channel);
+extern void (*hl_audio_push_hook)(const int16_t* pcm, int frames);
 
 /* NVRAM hooks, NULL = no chip (save discards, load leaves g untouched) */
 extern void (*hl_nvram_save_hook)(void);

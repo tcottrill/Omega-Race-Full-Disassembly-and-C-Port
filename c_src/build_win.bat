@@ -17,7 +17,7 @@ cl /nologo /W3 /MD /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /c ^
 
 cl /nologo /W4 /std:c11 /wd4102 /MD /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /Foobj\ ^
    app_loop.c platform\windows\plat_win.c mainline.c frame.c objects.c enemies.c score.c ^
-   irq_coins.c pages.c dvg_pages.c omega_pagerom.c omega_postrom.c post.c sound_samples.c omega_shapes.c glue.c dvg.c omega_vecrom.c omega_dvgprom.c ^
+   irq_coins.c pages.c dvg_pages.c omega_pagerom.c omega_postrom.c post.c sound_samples.c sound_board.c ay8910.c omega_sndrom.c omega_shapes.c glue.c dvg.c omega_vecrom.c omega_dvgprom.c ^
    obj\sys_gl.obj obj\glew.obj obj\log.obj ^
    obj\vector_draw.obj obj\mat4.obj obj\rawinput.obj ^
    obj\mixer.obj obj\fileio.obj obj\miniz.obj ^

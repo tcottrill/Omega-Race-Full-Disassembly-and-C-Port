@@ -24,6 +24,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <vector>
+#include <algorithm>
 #include "cpu_z80.h"
 
 int wrlog(char* format, ...) { return 0; }   // stub for cpu core logging
@@ -456,8 +458,185 @@ static void selftest(void)
     printf("selftest jsrl-shape: master=%lld  words=%d\n", (long long)c, stat_words);
 }
 
+//////////////////////// sound-board trace ("--sndboard-trace") //////////////
+//
+// Standalone sound Z80 (sound_k5.bin, 1.5 MHz = 12 MHz/8) harness, entirely
+// independent of the main-CPU rig above: its own 64 KB memory image, its own
+// port handlers, its own NMI/IRQ scheduling. Memory map: ROM 0x0000-0x07FF,
+// RAM 0x1000-0x13FF, everything else floats high (reads return 0xFF - the
+// command-0 quirk in SOUND_NOTES.md depends on that). Ports: IN 0x00 reads
+// the command latch; OUT 0/2 = AY1/AY2 register address, OUT 1/3 = AY1/AY2
+// data. NMI fires every 6144 cycles (244.140625 Hz); a command byte raises
+// the maskable IRQ (IM 1, vector 0x0038).
+
+static uint8_t  SMEM[0x10000];
+static uint8_t  snd_rom[0x800];
+static uint8_t  snd_latch = 0;
+static int      snd_ay_addr[2] = { 0, 0 };   // last OUT 0/OUT 2 address, per chip (0=AY1,1=AY2)
+static FILE*    snd_out = NULL;
+static int      snd_cur_tick = 0;            // ticks (NMIs) delivered so far - stamps W lines
+
+static UINT8 snd_r_unmapped(UINT32, struct MemoryReadByte*) { return 0xFF; }
+static void  snd_w_ignore(UINT32, UINT8, struct MemoryWriteByte*) {}
+
+static UINT16 snd_r_latch(UINT16, struct z80PortRead*) { return snd_latch; }
+
+static void snd_w_ay1_addr(UINT16, UINT8 v, struct z80PortWrite*) { snd_ay_addr[0] = v; }
+static void snd_w_ay2_addr(UINT16, UINT8 v, struct z80PortWrite*) { snd_ay_addr[1] = v; }
+static void snd_w_ay1_data(UINT16, UINT8 v, struct z80PortWrite*)
+{
+    fprintf(snd_out, "W %d 1 %x %x\n", snd_cur_tick, snd_ay_addr[0], v);
+}
+static void snd_w_ay2_data(UINT16, UINT8 v, struct z80PortWrite*)
+{
+    fprintf(snd_out, "W %d 2 %x %x\n", snd_cur_tick, snd_ay_addr[1], v);
+}
+
+static struct MemoryReadByte SndReadMap[] =
+{
+    { 0x0800, 0x0FFF, snd_r_unmapped },
+    { 0x1400, 0xFFFF, snd_r_unmapped },
+    { (UINT32)-1, (UINT32)-1, NULL }
+};
+static struct MemoryWriteByte SndWriteMap[] =
+{
+    { 0x0000, 0x07FF, snd_w_ignore },   // ROM: writes have no effect
+    { (UINT32)-1, (UINT32)-1, NULL }
+};
+static struct z80PortRead SndPortRead[] =
+{
+    { 0x00, 0x00, snd_r_latch },
+    { (UINT16)-1, (UINT16)-1, NULL }
+};
+static struct z80PortWrite SndPortWrite[] =
+{
+    { 0x00, 0x00, snd_w_ay1_addr },
+    { 0x01, 0x01, snd_w_ay1_data },
+    { 0x02, 0x02, snd_w_ay2_addr },
+    { 0x03, 0x03, snd_w_ay2_data },
+    { (UINT16)-1, (UINT16)-1, NULL }
+};
+
+#define SND_CYCLES_PER_NMI 6144
+#define SND_IDLE_LO 0x0090     // snd_main_loop: idle, waiting for the next tick
+#define SND_IDLE_HI 0x0097
+
+struct SndCmd { int tick; int cmd; };
+
+// Run one scenario to completion, writing its "S/C/W/E" block to `out`.
+// Timing model (see the mode's header comment above and the task spec):
+// reset at PC=0; NMI number k fires at cycle k*6144; a command "C t xx" is
+// latched 100 cycles before NMI number t+1 (t=0 is 100 cycles before the
+// very first NMI). Diagnostics fire when the CPU is not sitting in the idle
+// loop at the moment an NMI or a command IRQ lands.
+static void snd_run_scenario(FILE* out, cpu_z80* cpu, const char* name,
+                              const SndCmd* cmds, int ncmds, int run_ticks)
+{
+    memset(SMEM, 0, sizeof(SMEM));
+    memcpy(SMEM, snd_rom, sizeof(snd_rom));
+    snd_latch = 0;
+    snd_ay_addr[0] = snd_ay_addr[1] = 0;
+    snd_cur_tick = 0;
+    snd_out = out;
+    cpu->mz80reset();
+
+    fprintf(out, "S %s\n", name);
+
+    struct Ev { uint64_t cycle; int cmd; int tick; };
+    std::vector<Ev> evs;
+    for (int i = 0; i < ncmds; i++)
+        evs.push_back({ (uint64_t)(cmds[i].tick + 1) * SND_CYCLES_PER_NMI - 100,
+                         cmds[i].cmd, cmds[i].tick });
+    std::sort(evs.begin(), evs.end(),
+              [](const Ev& a, const Ev& b) { return a.cycle < b.cycle; });
+
+    uint64_t elapsed = 0;
+    size_t ei = 0;
+    int tick = 0;
+    uint64_t next_nmi = SND_CYCLES_PER_NMI;   // cycle of NMI number tick+1
+
+    for (;;)
+    {
+        // deliver any command whose latch time has arrived
+        while (ei < evs.size() && elapsed >= evs[ei].cycle)
+        {
+            uint16_t pc = cpu->GetPC();
+            if (pc < SND_IDLE_LO || pc > SND_IDLE_HI)
+                fprintf(out, "# busy at irq tick %d pc=%04x\n", evs[ei].tick, pc);
+            snd_latch = (uint8_t)evs[ei].cmd;
+            cpu->mz80int(0xff);              // IM 1: vector is irrelevant, Rst(0x38)
+            fprintf(out, "C %d %x\n", evs[ei].tick, evs[ei].cmd);
+            ei++;
+        }
+
+        // deliver the next NMI, or stop once run_ticks have been delivered
+        // and the last tick's work has had the rest of its window to finish
+        if (elapsed >= next_nmi)
+        {
+            if (tick >= run_ticks) break;
+            uint16_t pc = cpu->GetPC();
+            if (pc < SND_IDLE_LO || pc > SND_IDLE_HI)
+                fprintf(out, "# overrun at tick %d pc=%04x\n", tick + 1, pc);
+            cpu->mz80nmi();
+            tick++;
+            snd_cur_tick = tick;
+            next_nmi += SND_CYCLES_PER_NMI;
+        }
+
+        elapsed += cpu->mz80step();
+    }
+
+    fprintf(out, "E %d\n", run_ticks);
+}
+
+static int run_sndboard_trace(const char* outpath)
+{
+    if (!load("sound_k5.bin", snd_rom, sizeof(snd_rom))) return 1;
+
+    FILE* out = fopen(outpath, "w");
+    if (!out) { printf("cannot open %s for write\n", outpath); return 1; }
+
+    cpu_z80* scpu = new cpu_z80(SMEM, SndReadMap, SndWriteMap,
+                                 SndPortRead, SndPortWrite, 0xffff, 1);
+
+    char name[16];
+    for (int cmd = 1; cmd <= 0x16; cmd++)
+    {
+        snprintf(name, sizeof(name), "cmd_%02x", cmd);
+        SndCmd c[] = { { 8, cmd } };
+        snd_run_scenario(out, scpu, name, c, 1, 4000);
+    }
+
+    {
+        SndCmd c[] = { { 8, 0x0b }, { 300, 0x00 } };
+        snd_run_scenario(out, scpu, "cmd_00", c, 2, 600);
+    }
+
+    {
+        SndCmd c[] = {
+            { 8, 0x0b }, { 200, 0x09 }, { 260, 0x07 }, { 300, 0x07 },
+            { 330, 0x0a }, { 400, 0x08 }, { 500, 0x02 }, { 520, 0x15 },
+            { 560, 0x10 }, { 700, 0x03 }, { 720, 0x11 }, { 900, 0x0c },
+            { 1100, 0x12 }, { 1300, 0x01 },
+        };
+        snd_run_scenario(out, scpu, "mix_play", c, (int)(sizeof(c) / sizeof(c[0])), 2500);
+    }
+
+    {
+        SndCmd c[] = { { 8, 0x14 }, { 100, 0x04 }, { 1500, 0x14 }, { 1600, 0x13 } };
+        snd_run_scenario(out, scpu, "tune_bonus", c, (int)(sizeof(c) / sizeof(c[0])), 3000);
+    }
+
+    fclose(out);
+    printf("wrote %s\n", outpath);
+    return 0;
+}
+
 int main(int argc, char** argv)
 {
+    if (argc > 2 && !strcmp(argv[1], "--sndboard-trace"))
+        return run_sndboard_trace(argv[2]);
+
     MEM = (uint8_t*)calloc(1, 0x10000);
 
     // omega_dump.bin: the 64 KB address-space image (program 0x0000-0x3FFF,

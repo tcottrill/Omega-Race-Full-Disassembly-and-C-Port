@@ -88,6 +88,28 @@ zeroed by then — but the script has no `FF` terminator of its own.
 (Surfaced by the bytecode decoder now in `omega_sound.asm`; the whole
 script region is decoded there op-by-op, command table included.)
 
+### The sound Z80 runs late, and loses ticks (measured 2026-09-17)
+
+`frametime --sndboard-trace` runs `sound_k5.bin` alone on the Z80
+(1.5 MHz, NMI every 6144 cycles) and logs every AY write by tick. An
+idle pass - 23-slot scan plus the 32-register compare loop - already
+costs ~3900 of the tick's 6144 cycles, so any pass with real script work
+is still running when the next NMI lands (1093 such NMIs across the 25
+reference scenarios). That only delays the writes. But `snd_main_loop`
+runs ONE pass however far `snd_tick` has moved, so a pass spanning two or
+three NMIs loses ticks outright:
+
+- `SND_RESET` (power-on, and every command 0): the 1 KB `ldir` RAM clear
+  is ~21.5k cycles; the first pass runs at tick 4-5. **This is what
+  `SOUND_CMD_SEND`'s 4 x `WAIT_NEXT_TICK` after a command 0 waits out.**
+- Script 00's register wipe (run by `F4 00`: the head of 0x13 and 0x14,
+  the tail of 0x01): 19 kills, 32 loads and a near-full flush - 2-3 ticks.
+
+Every running script then sits that far behind the wall clock for good
+(cmd 0x13 alone: 1 tick late for its whole life). The C port's
+`sound_board.c` runs a pass in zero time and loses nothing; see its header
+for what that does and does not change.
+
 ### Sample-set cross-check
 
 `Release/samples/` holds `1 2 3 4 7 8 9 a b c d e f 10 11 12 13 14 15 16`

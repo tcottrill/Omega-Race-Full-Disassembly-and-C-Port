@@ -18,6 +18,7 @@ uint8_t hl_dsw_c4 = 0x5f, hl_dsw_c6 = 0xbf;
 void (*hl_vec_line_hook)(float, float, float, float, int) = NULL;
 void (*hl_sample_start_hook)(int, int, int) = NULL;
 void (*hl_sample_stop_hook)(int) = NULL;
+void (*hl_audio_push_hook)(const int16_t* pcm, int frames) = NULL;
 void (*hl_nvram_save_hook)(void) = NULL;
 void (*hl_nvram_load_hook)(void) = NULL;
 
@@ -50,3 +51,11 @@ void plat_sample_stop(int channel)
 {
     if (hl_sample_stop_hook) hl_sample_stop_hook(channel);
 }
+
+int  plat_sound_use_ay(void) { return 0; }
+int  plat_audio_open(int sample_rate) { (void)sample_rate; return 0; }
+void plat_audio_push(const int16_t* pcm, int frames)
+{
+    if (hl_audio_push_hook) hl_audio_push_hook(pcm, frames);
+}
+void plat_audio_close(void) {}

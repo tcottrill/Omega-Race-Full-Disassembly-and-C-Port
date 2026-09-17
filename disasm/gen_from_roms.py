@@ -15,6 +15,7 @@ standard MAME `omegrace` set and regenerates, in order:
        omega_dvgprom.c  DVG state PROM + wall list   (gen_dvgprom.py)
        omega_pagerom.c  attract/message page scripts (gen_pagerom.py)
        omega_postrom.c  POST screen display lists    (gen_postrom.py)
+       omega_sndrom.c   sound command table + scripts (gen_sndrom.py)
        omega_shapes.c/h named shapes as line segments (vecxref.py, which
                         also refreshes vec_names.py and
                         shapes_preview.html in disasm/)
@@ -116,6 +117,7 @@ def main():
     run("gen_dvgprom.py")            # -> ../c_src/omega_dvgprom.c
     run("gen_pagerom.py")            # -> ../c_src/omega_pagerom.c
     run("gen_postrom.py")            # -> ../c_src/omega_postrom.c
+    run("gen_sndrom.py")             # -> ../c_src/omega_sndrom.c
     run("vecxref.py")     # -> ../c_src/omega_shapes.c/h, vec_names.py
 
     if listings:

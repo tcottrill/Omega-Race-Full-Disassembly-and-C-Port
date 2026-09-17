@@ -58,6 +58,11 @@ void plat_sample_start(int channel, int sample, int loop)
 { (void)channel; (void)sample; (void)loop; }    /* TODO: Audio Library */
 void plat_sample_stop(int channel) { (void)channel; }
 
+int  plat_sound_use_ay(void) { return 0; }               /* TODO: Audio Library */
+int  plat_audio_open(int sample_rate) { (void)sample_rate; return -1; }
+void plat_audio_push(const int16_t* pcm, int frames) { (void)pcm; (void)frames; }
+void plat_audio_close(void) {}
+
 double plat_now_ms(void)
 {
 #ifdef ARDUINO

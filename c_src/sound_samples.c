@@ -1,6 +1,10 @@
 /* sound_samples.c - sample-based sound for the Omega Race C port.
  *
- * Design decision: do NOT emulate the sound Z80/AYs.
+ * The recorded-sample sound path: do NOT emulate the sound Z80/AYs.
+ * (sound_board.c - a port of the sound board's program driving two
+ * synthesized AY-3-8910s - takes over omega_hw_sound() when the host
+ * enables it, which the Windows backend does by default; this path is
+ * then [sound] ay8910=0, and the fallback when no audio stream opens.)
  * The game logic issues sound-command bytes exactly like the ROM wrote
  * port 0x14; this module maps each command to a pre-recorded sample.
  * Because samples trigger at the instant the command is issued, sound
@@ -69,8 +73,16 @@ static void stop_all(void)
         plat_sample_stop(ch);
 }
 
+/* sound_board.c: the synthesized alternative. When the host has switched
+ * it on, the command goes to the ported sound board's latch instead and
+ * none of the sample map below runs. */
+extern int  omega_sound_ay;
+extern void sndboard_command(uint8_t cmd);
+
 void omega_hw_sound(uint8_t cmd)
 {
+    if (omega_sound_ay) { sndboard_command(cmd); return; }
+
     switch (cmd)
     {
     case 0x00: stop_all(); break;                          /* all sound off         */

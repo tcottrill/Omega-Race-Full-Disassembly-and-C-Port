@@ -33,6 +33,13 @@ extern void omega_mainloop_frame(void);  /* object arm, per frame       */
 extern void post_boot(void);   /* post.c: POST_START / POST_TESTSW_GATE */
 extern void post_enter(void);  /* post.c: F2 - diagnostics from anywhere */
 
+/* sound_board.c: the synthesized sound board (backend opt-in) */
+extern int  omega_sound_ay;
+extern void sndboard_init(int sample_rate);
+extern void sndboard_tick(void);
+
+#define OMEGA_AUDIO_RATE 48000
+
 /* ------------------------------------------------------------------ */
 /* input mapping: plat_inputs -> the hardware's port bytes             */
 /* ------------------------------------------------------------------ */
@@ -117,6 +124,13 @@ void omega_app_init(void)
 {
     dvg_init();
     memset(&g, 0, sizeof g);
+    /* Sound path, before anything can issue a command: the synthesized
+     * sound board when the backend asks for it (the Windows default) AND
+     * can give us a stream to put it on, otherwise the samples. */
+    if (plat_sound_use_ay() && plat_audio_open(OMEGA_AUDIO_RATE) == 0) {
+        sndboard_init(OMEGA_AUDIO_RATE);
+        omega_sound_ay = 1;
+    }
     /* ROM boot order: POST_START -> POST_TESTSW_GATE, which jumps to
      * GAME_INIT when the test switch is released and runs the self test
      * while it is held. post_boot() is that gate; it calls game_init()
@@ -140,6 +154,11 @@ void omega_app_advance(double now_ms)
     if (irq_acc > 100.0) irq_acc = 100.0;        /* stall guard */
 
     while (irq_acc >= OMEGA_TICK_MS) {           /* the board's IRQ */
+        /* The sound board's NMI is this same GBNMI net. Its pass goes
+         * first: on the board it ran at once, in under a tick, so a
+         * command the main CPU issues during a tick is picked up by the
+         * sound board's NEXT pass - as it is here. */
+        if (omega_sound_ay) sndboard_tick();
         omega_irq_244hz();
         irq_acc -= OMEGA_TICK_MS;
         omega_mainloop_tick();

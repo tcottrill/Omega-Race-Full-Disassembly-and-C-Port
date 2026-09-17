@@ -38,7 +38,9 @@ Verified equivalences against hardware (the rig running the real ROMs):
   floating with display-list length exactly as the machine does.
 
 Deliberate departures, each documented in code: the sound board CPU is
-not emulated (commands map to samples recorded from a real board), F2
+not emulated (its program is ported to C like the game and drives two
+synthesized AY-3-8910s; `[sound] ay8910=0` maps the commands to samples
+recorded from a real board instead), F2
 enters the diagnostics from anywhere (hardware POST is power-on only),
 and an optional phosphor-persistence composite (`phosphor_ms`) smooths
 the hard-switched-LCD look of the authentic tick quantization.
@@ -56,7 +58,8 @@ the hard-switched-LCD look of the authentic tick quantization.
 | `post.c` | power-on self test: all five diagnostic screens, operator/audit page |
 | `dvg.c`, `dvg_pages.c`, `pages.c` | vector RAM, the DVG state machine + frame cost model, the object-list builder, and every text page/HUD built from the ROM's own page bytes |
 | `omega_vecrom.c`, `omega_shapes.c`, `omega_pagerom.c`, `omega_postrom.c`, `omega_dvgprom.c` | generated ROM data (shapes, pages, POST screens, DVG PROM) — no ROM files needed to build or run; regenerate from your own ROM set with `../disasm/gen_from_roms.py` |
-| `sound_samples.c`, `glue.c` | sound-command → sample map; cross-module bridges |
+| `sound_samples.c`, `glue.c` | the alternate sound path, sound-command → sample map; cross-module bridges |
+| `sound_board.c`, `ay8910.c`, `omega_sndrom.c` | the default sound path, synthesized: a 1:1 port of the sound Z80's script interpreter (`sound_k5.bin` 0x0000-0x0249) on the board's real memory map, the AAE/MAME-derived AY-3-8910 core converted to C (GPL), and the generated script ROM (0x024A-0x07FF) |
 | `app_loop.c` | the platform-agnostic application loop: machine-time tick service, input → port-byte mapping, NVRAM serialization, authentic frame pacing |
 | `omega_state.h` | `omega_state g` — all game state, fields named by RAM address |
 
@@ -92,6 +95,11 @@ The harnesses are the fast iteration loop — no window, simulated time:
 - `tests\probe_wave / probe_nvram / probe_hiscore / probe_sound /
   probe_post` — regression probes for once-broken behavior, each must
   print `PROBE PASSED`.
+- `tests\probe_sndboard` — differential: the ported sound board's AY
+  register-write stream must equal the real sound ROM's on the Z80, for
+  every command. The reference, `tests\sndboard_ref.txt`, is regenerated
+  from `disasm\` by
+  `frametime --sndboard-trace ..\c_src\tests\sndboard_ref.txt`.
 - `tests\probe.exe` (probe_objects) — 90 s object/display-list invariant
   sweep with `--play` for a real coined game.
 
@@ -113,9 +121,11 @@ default 1024x768 window, scaling in proportion with the picture in bigger
 windows and fullscreen, and the anti-alias feather in physical pixels on
 any screen, 2026-09-03;
 `phosphor_ms` — 0 disables the phosphor composite). High scores, credits, and operator bookkeeping
-persist in `omega_c.nv`, byte-compatible across builds. Sound loads
-from `samples\omegrace.zip`, a MAME-style sample set whose members are
-hex-named by the sound command byte (`1.wav` … `16.wav`).
+persist in `omega_c.nv`, byte-compatible across builds. Sound is
+synthesized by default (`[sound] ay8910=1`, no sample files needed;
+`ay_volume` 0–100 sets its level). `ay8910=0` plays recordings of a real
+board instead, from `samples\omegrace.zip`, a MAME-style sample set whose
+members are hex-named by the sound command byte (`1.wav` … `16.wav`).
 
 ## Provenance
 

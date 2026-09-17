@@ -62,12 +62,24 @@ void plat_input_poll(plat_inputs* in);
 uint8_t plat_dsw_c4(void);
 uint8_t plat_dsw_c6(void);
 
-/* ---- audio: sample playback (no sound CPU, by design) ------------------
+/* ---- audio: sample playback (the recorded-sample sound path) -----------
  * sound_samples.c (core) owns the command -> channel/sample map and the
  * ROM's mutual-kill sets; the backend just plays sample #n (hex-named
  * wav on the PC targets) on a mixer channel. */
 void plat_sample_start(int channel, int sample, int loop);
 void plat_sample_stop(int channel);
+
+/* ---- audio: PCM stream (the synthesized AY-3-8910 path) -----------------
+ * When plat_sound_use_ay() is nonzero (backend policy; the Windows
+ * backend defaults it on) the core runs its port of the sound board
+ * (sound_board.c + ay8910.c) instead of the sample map, renders both
+ * chips to one mono 16-bit block per 244 Hz tick and pushes it here.
+ * plat_audio_open returns 0 = ok; nonzero = no stream, and the core falls
+ * back to samples. */
+int  plat_sound_use_ay(void);
+int  plat_audio_open(int sample_rate);
+void plat_audio_push(const int16_t* pcm, int frames);
+void plat_audio_close(void);
 
 /* ---- time --------------------------------------------------------------- */
 

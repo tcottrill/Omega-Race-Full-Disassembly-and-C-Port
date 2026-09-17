@@ -30,6 +30,8 @@
 #ifndef MIXER_H
 #define MIXER_H
 
+#include <stdint.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -120,6 +122,55 @@ int         nameToNum(const char *name);       /* -1 if not found    */
 
 int mixer_percent_to_byte(int percent);        /* 0..100 -> 0..255 */
 int mixer_byte_to_percent(int vol255);         /* 0..255 -> 0..100 */
+
+/* -------------------------------------------------------------------------
+ * Streaming (a continuously-fed voice, for a synthesized source like a
+ * POKEY render loop rather than a sample loaded whole from disk)
+ *
+ * A single mono 16-bit PCM source voice at a fixed rate, fed in small
+ * blocks via stream_push -- the producer decides how many frames go in
+ * each call (up to STREAM_BLOCK_FRAMES) and how often; this just queues
+ * them on XAudio2, which plays queued buffers back to back with no gap.
+ * There is exactly one stream (not per-channel, unlike the sample API
+ * above); open it once, push forever, close it once.
+ *
+ * Latency: a push lands in the queue behind whatever XAudio2 has not yet
+ * drained, so worst-case latency is (buffers currently queued) *
+ * (frames per push) / sample_rate. At the intended cadence -- one push
+ * of ~4 ms of audio per NMI tick -- steady state is a couple of queued
+ * buffers, a matter of milliseconds; the full 16-slot ring is a hard
+ * ceiling for a caller that falls behind, not the expected depth.
+ * ------------------------------------------------------------------------- */
+#define STREAM_SLOTS        16
+#define STREAM_BLOCK_FRAMES 512
+
+/* Opens the stream voice at sample_rate, 16-bit PCM, `channels` channels
+   (1 or 2; the POKEY render this exists for is mono). Returns 0 on
+   success, -1 on failure (including "mixer_init was never called or
+   failed"). Safe to call again with the stream already open: a no-op
+   returning 0. */
+int  stream_open(int sample_rate, int channels);
+
+/* Queues up to STREAM_BLOCK_FRAMES frames of PCM (frames beyond that are
+   dropped, not clamped-and-copied-partially -- the caller should not be
+   pushing blocks that large). Starts the voice on the first call. If the
+   queue has reached STREAM_SLOTS - 1 buffers the queue is flushed first:
+   XAudio2 plays straight out of the ring slots, so the queue can never
+   be allowed to grow past the ring (the caller has fallen far behind;
+   a short gap beats stale audio). A no-op if the stream was never
+   opened. */
+void stream_push(const int16_t *pcm, int frames);
+
+/* Formats the stream's health counters since the previous call into buf
+   (pushes, pushes that found the voice drained, forced flushes, queue
+   depth range) and resets them. */
+void stream_stats(char *buf, size_t n);
+
+/* Stops and destroys the stream voice. Safe to call when not open. */
+void stream_close(void);
+
+/* 0..255, same curve as sample_set_volume. */
+void stream_set_volume(int vol255);
 
 #ifdef __cplusplus
 }

@@ -497,6 +497,10 @@ void mixer_end(void)
 
 	if (!g_xa2) return;
 
+	/* Belt and braces: a caller that forgot plat_audio_close (or never
+	   had one to call) should not leak the stream voice here. */
+	stream_close();
+
 	/* Voices first -- they hold pointers into sample data. */
 	for (i = 0; i < MIXER_MAX_CHANNELS; i++) {
 		channel_destroy_voice(&g_channel[i]);
@@ -771,4 +775,183 @@ int nameToNum(const char *name)
 		if (g_sample[i].in_use && strcmp(g_sample[i].name, name) == 0)
 			return i;
 	return -1;
+}
+
+/* -----------------------------------------------------------------------------
+ * Streaming (a continuously-fed voice; see mixer.h for the contract)
+ *
+ * Ring of STREAM_SLOTS buffers, static storage -- no malloc per push, same
+ * as the rest of this file avoids per-call allocation. Sized for up to
+ * stereo (2 channels) even though the one caller today (the POKEY render)
+ * is mono; the extra memory is trivial (16 * 512 * 2ch * 2 bytes = 32 KB).
+ * -------------------------------------------------------------------------- */
+typedef struct STREAM
+{
+	IXAudio2SourceVoice *voice;
+	int      channels;
+	int16_t  ring[STREAM_SLOTS][STREAM_BLOCK_FRAMES * 2];
+	int      next_slot;
+	int      started;
+} STREAM;
+
+static STREAM g_stream;
+
+/* Stream health counters, read and reset by stream_stats(): pushes that
+ * found the voice already drained (a gap was just heard), forced flushes,
+ * and the queue depth seen at push time. */
+static struct {
+	unsigned pushes, starved, flushes, depth_min, depth_max, depth_sum;
+} g_sstat;
+
+void stream_stats(char *buf, size_t n)
+{
+	snprintf(buf, n, "stream: %u pushes, %u starved, %u flushed, depth %u..%u avg %.1f",
+	         g_sstat.pushes, g_sstat.starved, g_sstat.flushes,
+	         g_sstat.pushes ? g_sstat.depth_min : 0, g_sstat.depth_max,
+	         g_sstat.pushes ? (double)g_sstat.depth_sum / g_sstat.pushes : 0.0);
+	memset(&g_sstat, 0, sizeof g_sstat);
+}
+
+int stream_open(int sample_rate, int channels)
+{
+	WAVEFORMATEX fx;
+	HRESULT hr;
+
+	if (!g_xa2) {
+		LOG_ERROR("stream_open: mixer not initialized");
+		return -1;
+	}
+	if (g_stream.voice) return 0;   /* already open */
+	if (channels != 1 && channels != 2) {
+		LOG_ERROR("stream_open: %d channels not supported (1 or 2 only)", channels);
+		return -1;
+	}
+	if (sample_rate <= 0) {
+		LOG_ERROR("stream_open: bad sample rate %d", sample_rate);
+		return -1;
+	}
+
+	memset(&fx, 0, sizeof fx);
+	fx.wFormatTag      = WAVE_FORMAT_PCM;
+	fx.nChannels       = (WORD)channels;
+	fx.nSamplesPerSec  = (DWORD)sample_rate;
+	fx.wBitsPerSample  = 16;
+	fx.nBlockAlign     = (WORD)(channels * 2);
+	fx.nAvgBytesPerSec = fx.nSamplesPerSec * fx.nBlockAlign;
+	fx.cbSize          = 0;
+
+	hr = IXAudio2_CreateSourceVoice(g_xa2, &g_stream.voice, &fx, 0,
+	                                 1.0f, NULL, NULL, NULL);
+	if (FAILED(hr)) {
+		LOG_ERROR("CreateSourceVoice (stream) failed: 0x%08lX", (unsigned long)hr);
+		g_stream.voice = NULL;
+		return -1;
+	}
+
+	g_stream.channels  = channels;
+	g_stream.next_slot = 0;
+	g_stream.started   = 0;
+	LOG_INFO("Stream voice open: %d Hz, %d channel(s)", sample_rate, channels);
+	return 0;
+}
+
+/* Queue STREAM_PRIME_BLOCKS blocks of silence, each `frames` long, ahead
+ * of the caller's audio.  The producer feeds one ~4 ms block per IRQ tick
+ * and XAudio2 drains at exactly that rate, so the queue depth never grows
+ * on its own: whatever is queued when the voice starts is the whole margin
+ * against a late push, and one starved quantum is an audible gap.  Three
+ * blocks (~12 ms) cover the frame-length hitches seen in practice at the
+ * cost of 12 ms of latency; done at voice start and again after a flush,
+ * which empties the queue the same way. */
+#define STREAM_PRIME_BLOCKS 3
+
+static void stream_prime(int frames)
+{
+	int i;
+	for (i = 0; i < STREAM_PRIME_BLOCKS; i++) {
+		XAUDIO2_BUFFER buf;
+		int16_t *slot = g_stream.ring[g_stream.next_slot];
+		g_stream.next_slot = (g_stream.next_slot + 1) % STREAM_SLOTS;
+		memset(slot, 0, (size_t)frames * g_stream.channels * sizeof(int16_t));
+		memset(&buf, 0, sizeof buf);
+		buf.AudioBytes = (UINT32)(frames * g_stream.channels * (int)sizeof(int16_t));
+		buf.pAudioData = (const BYTE *)slot;
+		XA2_CHECK(IXAudio2SourceVoice_SubmitSourceBuffer(g_stream.voice, &buf, NULL),
+		          "SubmitSourceBuffer (stream prime)");
+	}
+}
+
+void stream_push(const int16_t *pcm, int frames)
+{
+	XAUDIO2_VOICE_STATE state;
+	XAUDIO2_BUFFER       buf;
+	int16_t             *slot;
+	HRESULT              hr;
+
+	if (!g_stream.voice || !pcm || frames <= 0) return;
+	if (frames > STREAM_BLOCK_FRAMES) frames = STREAM_BLOCK_FRAMES;
+
+	IXAudio2SourceVoice_GetState(g_stream.voice, &state, XAUDIO2_VOICE_NOSAMPLESPLAYED);
+	if (g_sstat.pushes == 0 || state.BuffersQueued < g_sstat.depth_min)
+		g_sstat.depth_min = state.BuffersQueued;
+	if (state.BuffersQueued > g_sstat.depth_max) g_sstat.depth_max = state.BuffersQueued;
+	g_sstat.depth_sum += state.BuffersQueued;
+	g_sstat.pushes++;
+	if (g_stream.started && state.BuffersQueued == 0) g_sstat.starved++;
+	if (state.BuffersQueued >= STREAM_SLOTS - 1) {
+		g_sstat.flushes++;
+		/* The caller has fallen behind. XAudio2 reads each queued buffer
+		   from the ring slot it was submitted from, so a queue deeper than
+		   the ring would have the next push overwrite a slot XAudio2 still
+		   owns -- the bound is the ring, not XAUDIO2_MAX_QUEUED_BUFFERS.
+		   There is no "drop just the oldest" call in the API, so the whole
+		   backlog goes; a short gap beats a stretch of stale audio. */
+		XA2_CHECK(IXAudio2SourceVoice_FlushSourceBuffers(g_stream.voice),
+		          "FlushSourceBuffers (stream overflow)");
+		stream_prime(frames);
+	}
+	if (!g_stream.started)
+		stream_prime(frames);
+
+	slot = g_stream.ring[g_stream.next_slot];
+	g_stream.next_slot = (g_stream.next_slot + 1) % STREAM_SLOTS;
+	memcpy(slot, pcm, (size_t)frames * g_stream.channels * sizeof(int16_t));
+
+	memset(&buf, 0, sizeof buf);
+	buf.AudioBytes = (UINT32)(frames * g_stream.channels * (int)sizeof(int16_t));
+	buf.pAudioData = (const BYTE *)slot;
+
+	hr = IXAudio2SourceVoice_SubmitSourceBuffer(g_stream.voice, &buf, NULL);
+	if (FAILED(hr)) {
+		LOG_ERROR("SubmitSourceBuffer (stream) failed: 0x%08lX", (unsigned long)hr);
+		return;
+	}
+
+	if (!g_stream.started) {
+		hr = IXAudio2SourceVoice_Start(g_stream.voice, 0, XAUDIO2_COMMIT_NOW);
+		if (FAILED(hr))
+			LOG_ERROR("Voice start (stream) failed: 0x%08lX", (unsigned long)hr);
+		else
+			g_stream.started = 1;
+	}
+}
+
+void stream_close(void)
+{
+	if (!g_stream.voice) return;
+	XA2_CHECK(IXAudio2SourceVoice_Stop(g_stream.voice, 0, XAUDIO2_COMMIT_NOW),
+	          "Stop (stream)");
+	XA2_CHECK(IXAudio2SourceVoice_FlushSourceBuffers(g_stream.voice),
+	          "FlushSourceBuffers (stream)");
+	IXAudio2SourceVoice_DestroyVoice(g_stream.voice);
+	memset(&g_stream, 0, sizeof g_stream);
+	LOG_INFO("Stream voice closed");
+}
+
+void stream_set_volume(int vol255)
+{
+	if (!g_stream.voice) return;
+	XA2_CHECK(IXAudio2SourceVoice_SetVolume(g_stream.voice,
+	              volume_byte_to_linear(vol255), XAUDIO2_COMMIT_NOW),
+	          "SetVolume (stream)");
 }

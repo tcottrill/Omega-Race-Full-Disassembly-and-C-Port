@@ -335,6 +335,14 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM l
 
 static float beam_proj[16];
 
+/* [sound] ay8910 and ay_volume, read in plat_init: whether the core runs
+ * its AY-3-8910 sound-board port (streamed PCM) instead of the sample map,
+ * and the stream's volume when it does. See the "audio" block below and
+ * omega_platform.h's PCM-stream comment. */
+static int ay_mode = 1;         /* [sound] ay8910, default 1 (the AYs);
+                                   0 = the recorded sample set           */
+static int ay_volume = 100;     /* [sound] ay_volume, percent 0..100     */
+
 int plat_init(void)
 {
     WNDCLASS wc;
@@ -383,6 +391,17 @@ int plat_init(void)
      * (FRAME_PACING_NOTES.md). */
     swap_mode = get_config_int("main", "vsync", 0);
     set_config_int("main", "vsync", swap_mode);
+
+    /* [sound] ay8910: nonzero (the default) runs the core's AY-3-8910
+     * sound-board port (streamed PCM); 0 selects the recorded sample set
+     * instead. If the stream cannot be opened the core falls back to the
+     * samples by itself. ay_volume: the stream's volume, 0..100 percent. */
+    ay_mode = get_config_int("sound", "ay8910", 1) != 0;
+    set_config_int("sound", "ay8910", ay_mode);
+    ay_volume = get_config_int("sound", "ay_volume", 100);
+    if (ay_volume < 0)   ay_volume = 0;
+    if (ay_volume > 100) ay_volume = 100;
+    set_config_int("sound", "ay_volume", ay_volume);
 
     /* Phosphor decay time constant, ms. See the block above plat_video_
      * begin: a tuning knob, defaulted short because the V2000's
@@ -449,6 +468,7 @@ void plat_shutdown(void)
     timeEndPeriod(1);
     beam_shutdown();
     remove_joystick();
+    plat_audio_close();     /* stream voice first: mixer_end tears down g_xa2 */
     mixer_end();
     DeleteGLContext();
     LOG_INFO("omega_win backend closing");
@@ -582,8 +602,39 @@ uint8_t plat_dsw_c6(void) { return 0xbf; }
 void plat_leds_out(uint8_t led_shadow) { (void)led_shadow; }
 
 /* ------------------------------------------------------------------ */
-/* audio: sample playback                                              */
+/* audio: sample playback, and the AY-3-8910 PCM stream                */
 /* ------------------------------------------------------------------ */
+
+/* Two sound paths share this backend's mixer:
+ *  - the AY-3-8910 sound-board port (sound_board.c + ay8910.c, core) - the
+ *    default, [sound] ay8910=1: plat_sound_use_ay() tells the core to
+ *    render both chips to one mono 16-bit block per 244 Hz tick and push
+ *    it through plat_audio_push; mixer.c's stream voice (XAudio2) plays
+ *    the blocks back to back.
+ *  - samples, [sound] ay8910=0 (and the fallback if the stream will not
+ *    open): sound_samples.c (core) maps command bytes to hex-named wavs,
+ *    played on the mixer channels below. */
+
+int plat_sound_use_ay(void) { return ay_mode; }
+
+int plat_audio_open(int sample_rate)
+{
+    if (stream_open(sample_rate, 1) != 0)
+        return -1;
+    stream_set_volume(mixer_percent_to_byte(ay_volume));
+    LOG_INFO("AY-3-8910 stream open at %d Hz, volume %d%%", sample_rate, ay_volume);
+    return 0;
+}
+
+void plat_audio_push(const int16_t* pcm, int frames)
+{
+    stream_push(pcm, frames);
+}
+
+void plat_audio_close(void)
+{
+    stream_close();
+}
 
 /* sample number -> wav member of samples\omegrace.zip (a MAME-style
  * sample set). The number IS the port-0x14 command byte and the members
@@ -673,6 +724,14 @@ void plat_status_text(const char* s)
              "Left/Right turn, Space or Ctrl fire, Up or Alt thrust, "
              "5 coin, 1 start, Esc quit", s);
     set_window_title(buf);
+
+    /* AY mode: the stream's health, about once a second, to omega_win.log.
+     * "starved" is the number that matters - each one is an audible gap. */
+    if (ay_mode) {
+        char st[160];
+        stream_stats(st, sizeof st);
+        LOG_INFO("%s", st);
+    }
 }
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
