@@ -108,8 +108,11 @@ POST, hold in attract for the operator/audit page).
 `omega_win.ini` (written beside the exe): `[main] vsync` 0/1/2 — vsync
 off lets the panel free-run at the authentic floating rate; with a VRR
 display, vsync 1 + G-Sync is ideal. `[vector]` holds beam-rendering
-tuning (`linewidth`, `line_smoothing`, `phosphor_ms` — 0 disables the
-phosphor composite). High scores, credits, and operator bookkeeping
+tuning (`linewidth` and `line_smoothing`, the beam width in pixels at the
+default 1024x768 window, scaling in proportion with the picture in bigger
+windows and fullscreen, and the anti-alias feather in physical pixels on
+any screen, 2026-09-03;
+`phosphor_ms` — 0 disables the phosphor composite). High scores, credits, and operator bookkeeping
 persist in `omega_c.nv`, byte-compatible across builds. Sound loads
 from `samples\omegrace.zip`, a MAME-style sample set whose members are
 hex-named by the sound command byte (`1.wav` … `16.wav`).

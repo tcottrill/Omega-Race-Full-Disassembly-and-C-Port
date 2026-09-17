@@ -204,6 +204,53 @@ void ToggleFullscreen(void)
 }
 
 /* ------------------------------------------------------------------ */
+/* resolution-independent beam width                                   */
+/* ------------------------------------------------------------------ */
+
+/* The beam renderer takes its width and AA feather in DESIGN units (the
+ * beam projection's 1023 units span the letterboxed viewport), so a
+ * fixed design width gets FAT at small windows and thin at big ones.  In
+ * this backend the two ini keys the renderer reads, [vector] linewidth
+ * and line_smoothing, therefore mean the beam width in PIXELS AT THE DEFAULT 1024-WIDE
+ * WINDOW, scaling in proportion with the picture from there, and the AA
+ * feather in PHYSICAL PIXELS on any screen (defaults 2.5 and 1.25) - see
+ * update_beam_width() for both conversions.  (Same rule in every port
+ * that shares this backend - the Space Duel port established it,
+ * 2026-09-03.)  At the default 1024-wide window one design unit is
+ * about one pixel, so the old numbers look the same there. */
+static float beam_px = 2.5f;             /* [vector] linewidth, pixels      */
+static float beam_feather_px = 1.25f;    /* [vector] line_smoothing, pixels */
+
+static void update_beam_width(void)
+{
+    double vw;
+
+    /* WIDTH IS PROPORTIONAL (2026-09-03, user's choice after trying
+     * constant-pixel): the beam scales with the picture, so a window and
+     * fullscreen look the same relative to the drawing.  [vector]
+     * linewidth is calibrated as pixels at the default DESIGN_W-wide
+     * (1024) window: one design unit of the beam projection's 1023-unit
+     * span is 1023 / 1024 of a pixel there, so linewidth=2.5 draws 2.5 px
+     * at that size and 2.5 * (viewport width / 1024) px on a bigger
+     * screen. */
+    beam_set_linewidth((float)(beam_px * 1023.0 / (double)DESIGN_W));
+
+    /* THE FEATHER IS PHYSICAL PIXELS: anti-aliasing is a property of the
+     * pixel grid, not of the drawing, so [vector] line_smoothing means
+     * that many pixels of edge ramp on ANY screen - converted from the
+     * letterboxed viewport's actual pixel width (ViewOrthoScaled's fit),
+     * and redone on every WM_SIZE, fullscreen toggles included.  (Scaling
+     * the feather with the picture, as the first proportional version
+     * did, made every setting look fully anti-aliased in fullscreen: a
+     * 0.8 ramp became 2 px on a 2560-wide panel.) */
+    vw = (double)SCREEN_W;
+    if ((double)SCREEN_H * DESIGN_W < vw * DESIGN_H)
+        vw = (double)SCREEN_H * DESIGN_W / (double)DESIGN_H;
+    if (vw < 1.0) vw = 1.0;
+    beam_set_smoothing((float)(beam_feather_px * 1023.0 / vw));
+}
+
+/* ------------------------------------------------------------------ */
 /* window procedure                                                    */
 /* ------------------------------------------------------------------ */
 
@@ -215,6 +262,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM l
             SCREEN_W = LOWORD(lParam);
             SCREEN_H = HIWORD(lParam);
             ViewOrthoScaled(SCREEN_W, SCREEN_H, DESIGN_W, DESIGN_H);
+            update_beam_width();
         }
         return 0;
 
@@ -370,6 +418,20 @@ int plat_init(void)
     /* DVG space is 0..1023 on both axes, y up, squeezed into the 4:3
      * design rect. */
     mat4_ortho(beam_proj, 0.0f, 1023.0f, 0.0f, 1023.0f, -1.0f, 1.0f);
+
+    /* Pixel-based beam width (see update_beam_width above).  beam_init has
+     * just read the same two keys as design units and applied them; read
+     * them again here as pixels and re-apply, so the ini's numbers are the
+     * ones on screen at any window size. */
+    beam_px = get_config_float("vector", "linewidth", 2.5f);
+    beam_feather_px = get_config_float("vector", "line_smoothing", 1.25f);
+    if (beam_px < 0.1f) beam_px = 0.1f;
+    if (beam_feather_px < 0.0f) beam_feather_px = 0.0f;
+    set_config_float("vector", "linewidth", beam_px);
+    set_config_float("vector", "line_smoothing", beam_feather_px);
+    update_beam_width();
+    LOG_INFO("beam: %.2f px wide at a 1024-wide window (proportional), %.2f px feather on any screen ([vector] linewidth / line_smoothing)",
+             beam_px, beam_feather_px);
 
     /* 1 ms scheduler resolution: without it Sleep(1) rounds up to the
      * 15.6 ms quantum and the pacing loop repays the debt by firing
